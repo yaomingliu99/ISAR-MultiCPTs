@@ -1,0 +1,23 @@
+# Whitelist mode: ignore everything, then re-allow selected file types.
+# To track another extension, add a line like: !*.ext
+
+# Ignore everything
+*
+
+# Keep traversing into subdirectories so whitelisted files inside them are found
+!*/
+
+# Keep this file
+!.gitignore
+
+# Tracked file types
+!*.py
+!*.ipynb
+!*.yaml
+!*.yml
+!*.sas
+!*.json
+
+# Never track these even if they match a whitelisted type
+.ipynb_checkpoints/
+__pycache__/
