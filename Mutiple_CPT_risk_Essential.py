@@ -9,8 +9,8 @@ from multiple_cpt_risk_support import (
     merge_cptlin_results,
 )
 
-data_folder = Path("/mnt/d/Research/SAR With Python/Nutbolt_2027/Jul_2026/datasets/processed")
-DEFAULT_MODEL_BASE = Path("/mnt/d/Research/SAR With Python/Nutbolt_2027/Jul_2026/Multiple CPTs")
+data_folder = Path("/mnt/d/ISAR Multi-CPTs/Oct 2026/Data")
+DEFAULT_MODEL_BASE = Path("/mnt/d/ISAR Multi-CPTs/Oct 2026/Multiple CPTs")
 DEFAULT_CAT_COLS = ["prncptx"] + [f"cpt{i}" for i in range(1, 21)]
 
 model_base = DEFAULT_MODEL_BASE

@@ -9,15 +9,24 @@ Created on Thu Jan 15 09:55:51 2026
 
 from __future__ import annotations
 
+import os
 import pandas as pd
+import pyarrow as pa
 import numpy as np
 from pathlib import Path
+import subprocess
 
 from typing import Sequence
 from docx import Document
 from IPython.display import display
 
 import re
+
+import oracledb
+from sqlalchemy import create_engine, text, inspect
+from sqlalchemy.dialects.oracle import NUMBER, VARCHAR2, CLOB, DATE
+
+from nutbolt.sar_helpers import freq, means
 
 pd.set_option("display.max_columns", None)
 pd.set_option("display.max_rows", None)
@@ -26,141 +35,34 @@ pd.set_option("display.max_rows", None)
 # Paths / inputs (mirror your SAS macro vars)
 # -----------------------------------------------------------------------------
 
-data_folder = Path(r"D:\SARs_Targeted\SAR_Jul_2026\Multiple CPTs\Data")
-model_base = Path(r"D:\SARs_Targeted\SAR_Jul_2026\Multiple CPTs\Model")
+data_folder = Path("/mnt/d/ISAR Multi-CPTs/Oct 2026/Data")
+model_base = Path("/mnt/d/ISAR Multi-CPTs/Oct 2026/Multiple CPTs")
 
 for d in [data_folder, model_base,]:
     if not Path(d).is_dir():
         d.mkdir(parents=True, exist_ok=True)
         
 sar_paths = [
-    Path(r"D:\SARs_Targeted\SAR_Jul_2022\General SAR\sar_2022jul_final_target.sas7bdat"),
-    Path(r"D:\SARs_Targeted\SAR_Jul_2023\General SAR\sar_2023jul_final_target.sas7bdat"),
-    Path(r"D:\SARs_Targeted\SAR_Jul_2024\General SAR\sar_2024jul_final.sas7bdat"),
-    Path(r"D:\SARs_Targeted\SAR_Jul_2025\General SAR\SAR_2025jul_final.sas7bdat"),
+    Path(data_folder / "isar_2022oct_final.parquet"),
+    Path(data_folder / "isar_2023oct_final.parquet"),
+    Path(data_folder / "sar_2024oct_final.parquet"),
+    Path(data_folder / "sar_2025oct_final.parquet"),
 ]        
 
-def means(
-    df: pd.DataFrame,
-    vars_: Sequence[str],
-    output_path : str | None=None,
-    round_digits: int = 4,
-    ) -> pd.DataFrame:
-    """
-    Replicate SAS PROC MEANS (n nmiss mean std min max).
+sar1 = pd.read_parquet(sar_paths[0]).drop(columns=["delirium"])  # SAR Oct 2022 
+sar2 = pd.read_parquet(sar_paths[1]).drop(columns=["delirium"])  # SAR Oct 2023 
+sar3 = pd.read_parquet(sar_paths[2]).drop(columns=["delirium"])  # SAR Oct 2024 
+sar4 = pd.read_parquet(sar_paths[3])  # SAR Oct 2025 
+sar4["delirium"].value_counts(dropna=False)
+sar4["delirium"].drop(columns=["delirium"], inplace=False)
+sar4yr = [sar1, sar2, sar3, sar4]
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input DataFrame.
-    vars_ : Sequence[str]
-        Variables to summarize.
-    output_path : str
-        Path to output .xlsx file.
-    round_digits : int, optional
-        If provided, round results to this many decimals.
-
-    Returns
-    -------
-    pd.DataFrame
-        Summary statistics indexed by variable name.
-    """
-    # check variables exist
-    missing = [v for v in vars_ if v not in df.columns]
-    if missing:
-        raise KeyError(f"Columns not found: {missing}")
-
-    X = df[list(vars_)]
-
-    summary = pd.DataFrame({
-        "n": X.count(),
-        "nmiss": X.isna().sum(),
-        "missing_rate": X.isna().sum() / X.count(),
-        "mean": X.mean(),
-        "std": X.std(),
-        "min": X.min(),
-        "max": X.max(),
-        })
-
-    if round_digits is not None:
-        summary = summary.round(round_digits)
-    
-    if output_path is not None:
-        summary.to_excel(output_path, index=True)
-
-    return summary        
-
-def freq(
-    df: pd.DataFrame,
-    var_list: Sequence[str],
-    output_path: str | None=None,
-    display_tables: bool = True,
-    percent_digits: int = 2 
-    ) -> None:
-    """
-    Display and save frequency tables (including missing values) with percentages.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input DataFrame.
-    var_list : Sequence[str]
-        List of column names to summarize.
-    output_path : str
-        Path to output .docx file.
-    display_tables : bool, default True
-        Whether to display frequency tables in the notebook.
-    percent_digits : int, default 1
-        Number of decimal places for percentages.
-    """
-    # check variables exist
-    missing = [v for v in var_list if v not in df.columns]
-    if missing:
-        raise KeyError(f"Columns not found: {missing}")
-
-    doc = Document()
-    doc.add_heading("Frequency Tables", level=1)
-
-    for v in var_list:
-        vc = df[v].value_counts(dropna=False).sort_index()
-        total = vc.sum()
-
-        freq_df = (
-            vc.rename("count")
-              .to_frame()
-              .assign(
-                  percent=lambda x: (x["count"] / total * 100).round(percent_digits)
-              )
-        )
-
-        # ---- display in notebook ----
-        if display_tables:
-            display(freq_df)
-
-        # ---- write to Word ----
-        if output_path is not None:
-            doc.add_heading(f"Variable: {v}", level=2)
-    
-            table = doc.add_table(rows=1, cols=3)
-            hdr = table.rows[0].cells
-            hdr[0].text = "Value"
-            hdr[1].text = "Count"
-            hdr[2].text = "Percent"
-    
-            for idx, row in freq_df.iterrows():
-                cells = table.add_row().cells
-                cells[0].text = str(idx)
-                cells[1].text = str(row["count"])
-                cells[2].text = f'{row["percent"]:.{percent_digits}f}%'
-
-            doc.save(output_path)
-    
 # =============================================================================
 # Load data from the previous step 
 # In July SAR, this should be step3.sas7bdat 
 # =============================================================================
 
-step3 = pd.read_sas(data_folder / "step3.sas7bdat", encoding="latin-1")
+step3 = pd.read_parquet(data_folder / "step3.parquet")
 step3.columns = step3.columns.str.lower()  # convert column headers to lower case
 
 sorted(step3.columns.tolist())
@@ -355,18 +257,12 @@ def cptlin_5yr(df: pd.DataFrame, extra_keep=()) -> pd.DataFrame:
     
     return df
 
-sar1 = read_sas(sar_paths[0]).drop(columns=["delirium"])  # SAR July 2022 
-sar2 = read_sas(sar_paths[1]).drop(columns=["delirium"])  # SAR July 2023 
-sar3 = read_sas(sar_paths[2]).drop(columns=["delirium"])  # SAR July 2024 
-sar4 = read_sas(sar_paths[3]).drop(columns=["delirium"])  # SAR July 2025 
-
-sar4yr = [sar1, sar2, sar3, sar4]
-
 sar_dfs = [cptlin_5yr(p) for p in sar4yr]
 sar5 = cptlin_5yr(step3)
 
 sar5yr = pd.concat(sar_dfs + [sar5], ignore_index=True)
-
+sar5yr["delirium"].dtype
+sar5yr["delirium"] = sar5yr["delirium"].astype("Int64")
 sar5yr["delirium"].value_counts(dropna=False)
 sar5yr["fhsdecline"].value_counts(dropna=False)
 sar5yr["sermorb"].value_counts(dropna=False)
@@ -375,17 +271,19 @@ sar5yr["sermorb"].value_counts(dropna=False)
 sar5yr = sar5yr.sort_values(["division","asm1"]).drop_duplicates(["division","asm1"])
 # sar5yr["opsdlos"] = sar5yr["opsdlos"].fillna(30)
 
-sar5yr.to_parquet(data_folder / "sar5yr_for_cptlin.parquet", engine="fastparquet")
-sar5yr = pd.read_parquet(data_folder / "sar5yr_for_cptlin.parquet", engine="fastparquet")
+sar5yr.to_parquet(data_folder / "sar5yr_for_cptlin.parquet")
+sar5yr = pd.read_parquet(data_folder / "sar5yr_for_cptlin.parquet")
 
 # =============================================================================
 # Generate LOS75 outcome flags per procedure
 # =============================================================================
 
-los_summary = pd.read_sas(data_folder / "tprocs_los75.sas7bdat", encoding="latin-1")
+los_summary = pd.read_parquet(data_folder / "tprocs_los75.parquet")
 los_summary.columns = los_summary.columns.str.lower()
 los_summary["los_var_name"] = los_summary["los_var_name"].str.lower()
 los_summary["filter"] = los_summary["filter"].str.lower()
+
+los_summary
 
 _FILTER_RE_COLO = re.compile(r"^\s*where\s+colorectal\s*=\s*1\s+and\s+scorepatos\s*=\s*0\s*$", re.I)
 _FILTER_RE_TPROCS = re.compile(
@@ -517,7 +415,7 @@ for v in los_summary["los_var_name"]:
     n = s.notna().sum()
     print(v, "n=", n, "event_rate=", rate)
 
-sar5yr.to_parquet(data_folder / "sar5yr_for_cptlin.parquet", engine="fastparquet")
+sar5yr.to_parquet(data_folder / "sar5yr_for_cptlin.parquet")
 
 # =============================================================================
 # CPT linear risk random intercept by PRNCPTX for All Cases Morbidity
@@ -529,7 +427,7 @@ sar5yr.to_parquet(data_folder / "sar5yr_for_cptlin.parquet", engine="fastparquet
 # conda activate nutbolt016
 # jupyter lab . 
 
-sar5yr = pd.read_parquet(data_folder / "sar5yr_for_cptlin.parquet", engine="fastparquet")
+sar5yr = pd.read_parquet(data_folder / "sar5yr_for_cptlin.parquet")
 
 # check the counts of the variables in Morbidity CPT linear risk
 cols = ["agegroup_bucket", "asaclas", "fnstatpressurg"]
@@ -543,11 +441,16 @@ cpt_morb_risk.rename(columns={"mean": "cpt_morb_risk"}, inplace=True)
 cpt_morb_risk["prncptx"] = cpt_morb_risk["prncptx"].astype(str).str.strip()
 cpt_morb_risk.dtypes
 
-sar5yr = pd.read_parquet(data_folder / "sar5yr_for_cptlin.parquet", engine="fastparquet")
+cpt_morb_risk.head()
+
+sar5yr = pd.read_parquet(data_folder / "sar5yr_for_cptlin.parquet")
 sar5yr.dtypes
 
+sar5yr.shape
 df = pd.merge(sar5yr, cpt_morb_risk, on="prncptx", how="inner")
 df.head()
+
+df.shape
 
 rename_cpts = dict()
 
@@ -594,7 +497,7 @@ order = np.argsort(score, axis=1, kind="mergesort")  # stable
 
 df[cpt_cols] = np.take_along_axis(cpts, order, axis=1)
 
-df.to_parquet(data_folder / "sar5yr_for_cptlin.parquet", engine="fastparquet")
+df.to_parquet(data_folder / "sar5yr_for_cptlin.parquet")
 
 # assign string "Missing" to the missing value of cpt1 - cpt20
 cpt_cols = [f"cpt{i}" for i in range(1,21)]
@@ -604,7 +507,7 @@ df[cpt_cols] = df[cpt_cols].fillna("Missing")
 
 df.to_parquet(data_folder / "sar5yr_for_cptlin.parquet")
 
-df = pd.read_parquet(data_folder / "sar5yr_for_cptlin.parquet", engine="fastparquet")
+df = pd.read_parquet(data_folder / "sar5yr_for_cptlin.parquet")
 
 # check outcomes count 
 outcomes = ["postcode","score1b","compcard", "comppneu", "comptube",

@@ -261,11 +261,11 @@ def calibration_intercept_slope(y, p, eps=1e-6):
     p = clip_probs(p, eps=eps)
     x = np.log(p / (1 - p)).reshape(-1, 1)
 
+    # Unpenalized fit (C=np.inf replaces the deprecated penalty=None in sklearn>=1.8).
     lr = LogisticRegression(
-        penalty=None,
+        C=np.inf,
         solver="lbfgs",
         max_iter=200,
-        n_jobs=-1,
     )
     lr.fit(x, y)
     intercept = float(lr.intercept_[0])
