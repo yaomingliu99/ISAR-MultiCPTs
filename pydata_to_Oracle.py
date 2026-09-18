@@ -15,7 +15,7 @@ from sqlalchemy.dialects.oracle import NUMBER, VARCHAR2, CLOB, DATE
 pd.set_option('display.max_rows', None)
 pd.set_option("display.max_columns", None)
 
-cptlin_folder = Path("/mnt/d/Research/SAR With Python/Nutbolt_2027/Jul_2026/Multiple CPTs")
+cptlin_folder = Path("/mnt/d/ISAR Multi-CPTs/Oct 2026/Multiple CPTs")
 
 # =============================================================================
 # Supporting functions for uploading CPT linear risk to Oracle
@@ -119,6 +119,74 @@ def drop_oracle_table(engine, schema_name: str, table_name: str):
 
     with engine.begin() as conn:
         conn.execute(text(drop_sql))
+
+def list_oracle_tables_views(
+    schema_name: str = "STATS",
+    dsn: str = "STATS_CQITEST",
+    wallet_dir: str = "/opt/oracle/network-admin",
+    name_like: str | None = None,
+    engine=None,
+) -> pd.DataFrame:
+    """
+    List tables and views in an Oracle schema with their latest modification times.
+
+    Columns returned:
+      - OBJECT_NAME / OBJECT_TYPE : TABLE or VIEW
+      - CREATED                   : when the object was created
+      - LAST_DDL_TIME             : last DDL change (drop/recreate, ALTER, PK added, ...)
+      - LAST_DML_TIME             : last insert/update/delete tracked by Oracle
+                                    (ALL_TAB_MODIFICATIONS; may lag until stats are
+                                    flushed and is NULL for views)
+      - LAST_MODIFIED             : greatest of the above, i.e. the latest change
+      - NUM_ROWS / LAST_ANALYZED  : optimizer statistics for tables
+
+    Because this project drops and recreates tables on every upload, LAST_DDL_TIME
+    is the most reliable "last uploaded" timestamp.
+
+    name_like: optional Oracle LIKE pattern, e.g. '%CPTLIN%'.
+    """
+    schema_name = schema_name.upper()
+
+    if engine is None:
+        engine = get_oracle_engine(dsn=dsn, wallet_dir=wallet_dir)
+
+    sql = """
+        SELECT
+            o.owner,
+            o.object_name,
+            o.object_type,
+            o.created,
+            o.last_ddl_time,
+            m.timestamp                                    AS last_dml_time,
+            GREATEST(o.created,
+                     o.last_ddl_time,
+                     NVL(m.timestamp, o.created))         AS last_modified,
+            t.num_rows,
+            t.last_analyzed
+        FROM all_objects o
+        LEFT JOIN all_tab_modifications m
+               ON m.table_owner = o.owner
+              AND m.table_name = o.object_name
+              AND m.partition_name IS NULL
+        LEFT JOIN all_tables t
+               ON t.owner = o.owner
+              AND t.table_name = o.object_name
+        WHERE o.owner = :schema_name
+          AND o.object_type IN ('TABLE', 'VIEW')
+          AND (:name_like IS NULL OR o.object_name LIKE :name_like)
+        ORDER BY last_modified DESC, o.object_name
+    """
+
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            text(sql),
+            conn,
+            params={"schema_name": schema_name, "name_like": name_like},
+        )
+
+    df.columns = df.columns.str.upper()
+    return df
+
 
 def read_table_file(file_path, read_kwargs: dict | None = None) -> pd.DataFrame:
     """
@@ -332,7 +400,7 @@ result = upload_csv_to_oracle_replace(
     file_path=cptlin_folder / "Essential_cptlin.parquet",
     table_name="ESSENTIAL_CPTLIN",
     schema_name="STATS",
-    dsn="STATS_CQITEST",
+    dsn="STATS_CQIPROD",
     use_native_batch=True,
 )
 
@@ -582,7 +650,7 @@ oracledb.init_oracle_client(
 
 engine = create_engine(
     "oracle+oracledb://",
-    connect_args={"dsn": "STATS_CQITEST"},
+    connect_args={"dsn": "STATS_CQIPROD"},
     pool_pre_ping=True,
 )
 
@@ -592,7 +660,24 @@ with engine.connect() as conn:
     print(result.fetchone())
 
 # =============================================================================
-# # Check if Primary Key was set correctly  
+# # List tables/views in STATS with latest modification date time
+# =============================================================================
+for dsn in ["STATS_CQITEST", "STATS_CQIPROD"]:
+    objects = list_oracle_tables_views(
+        schema_name="STATS",
+        dsn=dsn,
+        name_like="%CPTLIN%",   # set to None to list every table and view
+    )
+    print(f"\n{dsn} - STATS objects ({len(objects)}):")
+    print(
+        objects[
+            ["OBJECT_NAME", "OBJECT_TYPE", "CREATED",
+             "LAST_DDL_TIME", "LAST_DML_TIME", "LAST_MODIFIED", "NUM_ROWS"]
+        ].to_string(index=False)
+    )
+
+# =============================================================================
+# # Check if Primary Key was set correctly
 # =============================================================================
 # engine = get_oracle_engine(dsn="STATS_CQITEST")
 
